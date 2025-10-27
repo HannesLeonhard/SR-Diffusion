@@ -84,7 +84,13 @@ class ScoreNet(nn.Module):
     A time-dependent score-based model build upon the U-Net architecture
     """
 
-    def __init__(self, marginal_prob_std, channels=[32, 64, 128, 256], embed_dim=256, in_channels=1):
+    def __init__(
+        self,
+        marginal_prob_std,
+        channels=[32, 64, 128, 256],
+        embed_dim=256,
+        in_channels=1,
+    ):
         """
         Initialize a time-dependent score-based network.
 
@@ -148,3 +154,84 @@ class ScoreNet(nn.Module):
         h = self.up_tconv4(torch.cat([h, h1], dim=1))
         h = h / self.marginal_prob_std(t)[:, None, None, None]
         return h
+
+
+class ExponentialMovingAverage:
+    """
+    Maintains an exponential moving average (EMA) of a model's parameters.
+
+    The implementation keeps a shadow copy of all trainable parameters and
+    supports applying the shadow weights to the model and restoring the
+    original weights afterwards.
+    """
+
+    def __init__(self, model, decay=0.9999, device=None):
+        self.decay = decay
+        self.device = device
+        # shadow holds the EMA parameters
+        self.shadow = {}
+        # backup is used when apply_shadow is called to store originals
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = (
+                    param.data.detach().clone().to(device)
+                    if device
+                    else param.data.detach().clone()
+                )
+
+    def update(self, model):
+        """Update the shadow parameters using current model params.
+
+        Should be called after each optimizer step (or at desired frequency).
+        """
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                new_val = (
+                    param.data.detach().clone().to(self.device)
+                    if self.device
+                    else param.data.detach().clone()
+                )
+                self.shadow[name].mul_(self.decay).add_(
+                    new_val, alpha=(1.0 - self.decay)
+                )
+
+    def apply_shadow(self, model):
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                # backup on CPU to reduce GPU mem (optional)
+                self.backup[name] = param.detach().cpu().clone()
+        # copy shadow -> model under no_grad
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    param.copy_(self.shadow[name].to(param.device))
+
+    def restore(self, model):
+        if not self.backup:
+            raise RuntimeError("No backup found: call apply_shadow() before restore().")
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    param.copy_(self.backup[name].to(param.device))
+        self.backup = {}
+
+    def copy_to(self, model):
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    param.copy_(self.shadow[name].to(param.device))
+
+    def state_dict(self):
+        # Return a CPU copy of the shadow dict (good for saving)
+        return {k: v.cpu() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state):
+        # Load shadow values (state is a dict of name -> tensor)
+        for k, v in state.items():
+            if k in self.shadow:
+                self.shadow[k] = v.to(self.device) if self.device else v.clone()
+            else:
+                raise KeyError(f"EMA: unexpected key {k} in state_dict")

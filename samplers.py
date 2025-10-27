@@ -14,6 +14,7 @@ def ode_sampler(
     rtol=1e-5,
     z=None,
     conditioning_x=None,
+    ema=None,
     eps=1e-3,
 ):
     """Generate samples from score-based models with black-box ODE solvers.
@@ -42,10 +43,6 @@ def ode_sampler(
     else:
         init_x = z
 
-# Keep conditioning separate from the ODE state. The ODE evolves only the
-# latent image tensor (e.g. shape (B,1,28,28)). The conditioning (e.g. a low-
-# resolution or guide image) is passed to the score model during evaluation
-# but should NOT be part of the ODE state vector.
     if conditioning_x is not None:
         # Ensure conditioning is on the same device; keep a reference named cond_x
         cond_x = conditioning_x.to(device=device)
@@ -80,9 +77,14 @@ def ode_sampler(
         return -0.5 * (g**2) * score_eval_wrapper(x, time_steps)
 
     # Run the black-box ODE solver.
+    # If an EMA is provided, temporarily apply EMA weights to the model for
+    # sampling and restore the original weights afterwards.
+    base_model = getattr(score_model, "module", score_model)
+    if ema is not None:
+        ema.apply_shadow(base_model)
+
     # Sanity check: ensure the model returns a flattened vector the same size as the
-    # flattened ODE state. This gives a clear error when shapes mismatch instead
-    # of the lower-level broadcasting error inside SciPy.
+    # flattened ODE state. This provides a clearer error if shapes mismatch.
     try:
         f0 = score_eval_wrapper(init_x.reshape(-1).cpu().numpy(), np.ones((shape[0],)) * 1.0)
         y0_flat = init_x.reshape(-1).cpu().numpy()
@@ -93,16 +95,24 @@ def ode_sampler(
                 "Pass it using the `conditioning_x` argument so the sampler can concatenate it only for model evaluation."
             )
     except Exception:
-        # Re-raise to surface helpful diagnostic to the user.
+        # If we applied EMA, restore before re-raising so model weights are not left changed.
+        if ema is not None:
+            ema.restore(base_model)
         raise
-    res = integrate.solve_ivp(
-        ode_func,
-        (1.0, eps),
-        init_x.reshape(-1).cpu().numpy(),
-        rtol=rtol,
-        atol=atol,
-        method="RK45",
-    )
+
+    try:
+        res = integrate.solve_ivp(
+            ode_func,
+            (1.0, eps),
+            init_x.reshape(-1).cpu().numpy(),
+            rtol=rtol,
+            atol=atol,
+            method="RK45",
+        )
+    finally:
+        # restore original weights if we replaced them with EMA
+        if ema is not None:
+            ema.restore(base_model)
     print(f"Number of function evaluations: {res.nfev}")
     x = torch.tensor(res.y[:, -1], device=device, dtype=torch.float32).reshape(shape)
 
