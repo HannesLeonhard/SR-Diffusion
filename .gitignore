@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# datasets
+MNIST/*
+imagenette2/**
+imagenette2.tgz
+
+# model checkpoints
+ckpt**
+
+# test scripts
+playground.ipynb

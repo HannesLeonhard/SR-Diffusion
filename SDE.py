@@ -2,6 +2,8 @@ import torch
 import torchvision
 import numpy as np
 import functools
+import torchvision.transforms.functional as F
+import torch.nn.functional as NN_F
 
 from globals import device, sigma
 
@@ -68,6 +70,78 @@ def loss_fn(model, x, marginal_prob_std, eps=1e-5, debug=False):
 def loss_fn_sr(model, x, marginal_prob_std, eps=1e-5, debug=False):
     """The loss function for training score-based generative models.
 
+    Args:
+      model: A PyTorch model instance that represents a
+        time-dependent score-based model.
+      x: A mini-batch of training data.
+      marginal_prob_std: A function that gives the standard deviation of
+        the perturbation kernel.
+      eps: A tolerance value for numerical stability.
+      debug: Provides extra debug context if set to True
+    """
+    global device
+    rand_t = torch.rand(x.shape[0], device=device) * (1.0 - eps) + eps
+    z = torch.randn_like(x)
+    std = marginal_prob_std(rand_t)
+    perturbed_x = x + z * std[:, None, None, None]
+    downsampled_x = torchvision.transforms.functional.adjust_sharpness(x, 0.01)
+    conditioned_x = torch.cat([perturbed_x, downsampled_x], dim=1)
+    score = model(conditioned_x, rand_t)
+    loss = torch.mean(
+        torch.sum((score * std[:, None, None, None] + z) ** 2, dim=(1, 2, 3))
+    )
+    if debug:
+        return loss, rand_t, z, std, conditioned_x, score
+    return loss
+
+
+def loss_fn_sr_imagenette(
+    model, hr_images, marginal_prob_std, upscale_factor=4, eps=1e-5, debug=False
+):
+    """
+    Score Matching Loss for a Conditional Diffusion Model (Super-Resolution).
+
+    The model is conditioned on the Low-Resolution (LR) version of the input HR image.
+
+    Args:
+      model: A PyTorch model instance representing a time-dependent score-based model
+             that takes a concatenated tensor (perturbed_hr | lr_input) as input.
+      hr_images: A mini-batch of High-Resolution (HR) training data (B, 3, H, W).
+      marginal_prob_std: A function that gives the standard deviation of
+        the perturbation kernel.
+      upscale_factor: The ratio between HR and LR (e.g., 4 for 4x SR).
+      eps: A tolerance value for numerical stability.
+      debug: Provides extra debug context if set to True.
+    """
+    device = hr_images.device
+    lr_images = NN_F.interpolate(
+        hr_images,
+        scale_factor=1.0 / upscale_factor,
+        mode="bicubic",
+        align_corners=False,
+    )
+    lr_input = NN_F.interpolate(
+        lr_images,
+        size=hr_images.shape[2:],  # H, W of the HR image
+        mode="bicubic",
+        align_corners=False,
+    )
+    rand_t = torch.rand(hr_images.shape[0], device=device) * (1.0 - eps) + eps
+    z = torch.randn_like(hr_images)
+    std = marginal_prob_std(rand_t)
+    perturbed_hr = hr_images + z * std[:, None, None, None]
+    conditioned_input = torch.cat([perturbed_hr, lr_input], dim=1)
+    score = model(conditioned_input, rand_t)
+    loss = torch.mean(
+        torch.sum((score * std[:, None, None, None] + z) ** 2, dim=(1, 2, 3))
+    )
+    if debug:
+        return loss, rand_t, z, std, conditioned_input, score
+    return loss
+
+
+def loss_fn_sr_mri(model, x, marginal_prob_std, eps=1e-5, debug=False):
+    """
     Args:
       model: A PyTorch model instance that represents a
         time-dependent score-based model.

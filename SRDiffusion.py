@@ -43,7 +43,12 @@ class UNetDownBlock(nn.Module):
     def __init__(self, in_channels, out_channels, embed_dim, num_groups, stride):
         super().__init__()
         self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=stride, bias=False
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
         )
         self.dense = Dense(embed_dim, out_channels)
         self.gnorm = nn.GroupNorm(num_groups, num_channels=out_channels)
@@ -64,6 +69,7 @@ class UNetUpBlock(nn.Module):
             out_channels,
             kernel_size=3,
             stride=stride,
+            padding=1,
             bias=False,
             output_padding=out_padding,
         )
@@ -120,7 +126,7 @@ class ScoreNet(nn.Module):
         )
         # Decoding layers
         self.up_block1 = UNetUpBlock(
-            channels[3], channels[2], embed_dim, stride=2, num_groups=32
+            channels[3], channels[2], embed_dim, stride=2, num_groups=32, out_padding=1
         )
         self.up_block2 = UNetUpBlock(
             channels[2] * 2,
@@ -138,7 +144,10 @@ class ScoreNet(nn.Module):
             num_groups=32,
             out_padding=1,
         )
-        self.up_tconv4 = nn.ConvTranspose2d(channels[0] * 2, 1, kernel_size=3, stride=1)
+        outchannels = in_channels // 2 if in_channels > 1 else 1
+        self.up_tconv4 = nn.ConvTranspose2d(
+            channels[0] * 2, outchannels, kernel_size=3, stride=1, padding=1
+        )
         self.act = lambda x: x * torch.sigmoid(x)
         self.marginal_prob_std = marginal_prob_std
 
